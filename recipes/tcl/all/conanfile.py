@@ -2,7 +2,7 @@ from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.apple import fix_apple_shared_install_name, is_apple_os
 from conan.tools.files import apply_conandata_patches, chdir, collect_libs, copy, export_conandata_patches, get, replace_in_file, rmdir
-from conan.tools.gnu import Autotools, AutotoolsToolchain
+from conan.tools.gnu import Autotools, AutotoolsDeps, AutotoolsToolchain, PkgConfigDeps
 from conan.tools.microsoft import is_msvc, is_msvc_static_runtime, msvc_runtime_flag, NMakeToolchain
 import os
 
@@ -78,10 +78,16 @@ class TclConan(ConanFile):
                 "--enable-64bit={}".format(yes_no(self.settings.arch == "x86_64")),
             ])
             tc.generate()
+            # generate pkg-config files of dependencies (useless if upstream configure.ac doesn't rely on PKG_CHECK_MODULES macro)
+            tc = PkgConfigDeps(self)
+            tc.generate()
+            tc = AutotoolsDeps(self)
+            tc.generate()
 
     def _get_default_build_system_subdir(self):
         return {
             "Macos": "macosx",
+            "FreeBSD": "unix",
             "Linux": "unix",
             "Windows": "win",
         }[str(self.settings.os)]
