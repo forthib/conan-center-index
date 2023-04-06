@@ -1,8 +1,9 @@
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.apple import fix_apple_shared_install_name, is_apple_os
-from conan.tools.files import apply_conandata_patches, chdir, collect_libs, copy, export_conandata_patches, get, replace_in_file, rmdir
+from conan.tools.files import apply_conandata_patches, chdir, collect_libs, copy, export_conandata_patches, get, replace_in_file, rename, rmdir
 from conan.tools.gnu import Autotools, AutotoolsToolchain
+from conan.tools.layout import basic_layout
 from conan.tools.microsoft import is_msvc, is_msvc_static_runtime, msvc_runtime_flag, NMakeToolchain
 import os
 
@@ -31,6 +32,14 @@ class TclConan(ConanFile):
     def _settings_build(self):
         return getattr(self, "settings_build", self.settings)
 
+    @property
+    def _prefix_name(self):
+        return "tclprefix"
+
+    @property
+    def _prefix_path(self):
+        return "/" + self._prefix_name
+
     def export_sources(self):
         export_conandata_patches(self)
 
@@ -45,9 +54,7 @@ class TclConan(ConanFile):
         self.settings.rm_safe("compiler.cppstd")
 
     def layout(self):
-        # Not using basic_layout because package() needs the source folder to be a sub-directory of the build folder
-        self.folders.source = "src"
-        self.folders.generators = "conan"
+        basic_layout(self, src_folder="src")
 
     def requirements(self):
         self.requires("zlib/1.2.13")
@@ -70,7 +77,8 @@ class TclConan(ConanFile):
             tc = NMakeToolchain(self)
             tc.generate()
         else:
-            tc = AutotoolsToolchain(self, prefix=self.package_folder)
+            # Add a dummy prefix to facilitate patching of tclConfig.sh at package stage
+            tc = AutotoolsToolchain(self, prefix=self._prefix_path)
             def yes_no(v): return "yes" if v else "no"
             tc.configure_args.extend([
                 "--enable-threads",
@@ -143,8 +151,9 @@ class TclConan(ConanFile):
             opts.append("unchecked")
 
         with chdir(self, self._get_configure_dir("win")):
-            self.run('nmake -nologo -f "{cfgdir}/makefile.vc" INSTALLDIR="{pkgdir}" OPTS={opts} {targets}'.format(
+            self.run('nmake -nologo -f "{cfgdir}/makefile.vc" TMP_DIR="{outdir}" OUT_DIR="{outdir}" INSTALLDIR="{pkgdir}" OPTS={opts} {targets}'.format(
                 cfgdir=self._get_configure_dir("win"),
+                outdir=self.build_folder,
                 pkgdir=self.package_folder,
                 opts=",".join(opts),
                 targets=" ".join(targets),
@@ -163,32 +172,18 @@ class TclConan(ConanFile):
                 if "Makefile" in list_of_files:
                     replace_in_file(self, os.path.join(root, "Makefile"), "-Dstrtod=fixstrtod", "", strict=False)
 
-    def package(self):
-        copy(self, "license.terms", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
-        if is_msvc(self):
-            self._build_nmake(["install-binaries", "install-libraries"])
-        else:
-            autotools = Autotools(self)
-            autotools.make(target="install")
-            autotools.make(target="install-private-headers")
+            autotools.make()
 
-            rmdir(self, os.path.join(self.package_folder, "lib", "pkgconfig"))
-            rmdir(self, os.path.join(self.package_folder, "man"))
-            rmdir(self, os.path.join(self.package_folder, "share"))
-
+    def _patch_tclconfig(self):
         tclConfigShPath = os.path.join(self.package_folder, "lib", "tclConfig.sh")
-        package_path = self.package_folder
+        prefix_path = self.package_folder if is_msvc(self) else self._prefix_path
         build_folder = self.build_folder
         if self.settings.os == "Windows" and not is_msvc(self):
-            package_path = package_path.replace("\\", "/")
             drive, path = os.path.splitdrive(self.build_folder)
             build_folder = "".join([drive, path.lower().replace("\\", "/")])
 
-        print(f"package_path={package_path}")
-        print(f"build_folder={build_folder}")
-
         replace_in_file(self, tclConfigShPath,
-                        package_path,
+                        prefix_path,
                         "${TCL_ROOT}")
         replace_in_file(self, tclConfigShPath,
                         build_folder,
@@ -201,6 +196,23 @@ class TclConan(ConanFile):
                         "\nTCL_SRC_DIR",
                         "\n#TCL_SRC_DIR")
 
+
+    def package(self):
+        copy(self, "license.terms", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
+        if is_msvc(self):
+            self._build_nmake(["install-binaries", "install-libraries"])
+        else:
+            autotools = Autotools(self)
+            autotools.install(target="install")
+            autotools.install(target="install-private-headers")
+            for dirname in os.listdir(os.path.join(self.package_folder, self._prefix_name)):
+                rename(self, os.path.join(self.package_folder, self._prefix_name, dirname), os.path.join(self.package_folder, dirname))
+            rmdir(self, os.path.join(self.package_folder, "lib", "pkgconfig"))
+            rmdir(self, os.path.join(self.package_folder, "man"))
+            rmdir(self, os.path.join(self.package_folder, "share"))
+            rmdir(self, os.path.join(self.package_folder, self._prefix_name))
+
+        self._patch_tclconfig()
         fix_apple_shared_install_name(self)
 
     def package_info(self):
